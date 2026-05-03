@@ -1,23 +1,40 @@
-K3S_INSTALL_DIR="$HOME/dev/k3s-install"
+K3S_INSTALL_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 K3S_INSTALL_SCRIPT="$K3S_INSTALL_DIR/k3s-install.sh"
 
-mkdir $K3S_INSTALL_DIR
+mkdir -p "$K3S_INSTALL_DIR"
 
-cat <<'EOF' > $K3S_INSTALL_SCRIPT
+cat <<'EOF' > "$K3S_INSTALL_SCRIPT"
 #!/usr/bin/env bash
 set -euo pipefail
 
 KUBECONFIG_PATH="$HOME/.kube/config"
 
+K3S_CONTAINERD_CONFIG_DIR="/var/lib/rancher/k3s/agent/etc/containerd"
+K3S_CONTAINERD_CONFIG="$K3S_CONTAINERD_CONFIG_DIR/config.toml"
+K3S_CONTAINERD_CONFIG_TEMPLATE_V3="$K3S_CONTAINERD_CONFIG_DIR/config-v3.toml.tmpl"
+K3S_CONTAINERD_CONFIG_TEMPLATE_V2="$K3S_CONTAINERD_CONFIG_DIR/config.toml.tmpl"
+K3S_CONTAINERD_SOCKET="/run/k3s/containerd/containerd.sock"
+K3S_CONTAINERD_TEMPLATE_PATH=""
+
 K3S_READY_MAX_ATTEMPTS=60
 K3S_READY_SLEEP_SECONDS=5
 K3S_READY_CHECK_TIMEOUT="10s"
+K3S_CONTAINERD_READY_MAX_ATTEMPTS=60
+K3S_CONTAINERD_READY_SLEEP_SECONDS=2
 
-NVDP_RELEASE_NAME="nvdp"
-NVDP_NAMESPACE="nvidia-device-plugin"
-NVDP_REPO_NAME="nvdp"
-NVDP_REPO_URL="https://nvidia.github.io/k8s-device-plugin"
-NVDP_CHART_NAME="nvdp/nvidia-device-plugin"
+KATA_RELEASE_NAME="kata-deploy"
+KATA_NAMESPACE="kube-system"
+KATA_CHART_NAME="oci://ghcr.io/kata-containers/kata-deploy-charts/kata-deploy"
+KATA_CHART_VERSION="${KATA_CHART_VERSION:-}"
+
+NVIDIA_GPU_OPERATOR_RELEASE_NAME="gpu-operator"
+NVIDIA_GPU_OPERATOR_NAMESPACE="gpu-operator"
+NVIDIA_GPU_OPERATOR_REPO_NAME="nvidia"
+NVIDIA_GPU_OPERATOR_REPO_URL="https://helm.ngc.nvidia.com/nvidia"
+NVIDIA_GPU_OPERATOR_CHART_NAME="nvidia/gpu-operator"
+NVIDIA_GPU_OPERATOR_CHART_VERSION="${NVIDIA_GPU_OPERATOR_CHART_VERSION:-}"
+
+NGINX_CLUSTERIP_EXAMPLE_MANIFEST_URL="https://gist.githubusercontent.com/ehsqjfwk99999/b94c0a2578594fe1ad75d17c1458cff9/raw/1fc7c012f99be40c781ea25eb1b7a0352ea433b1/nginx-deployment-clusterip-example.yaml"
 
 if [ -t 1 ]; then
   BOLD="\033[1m"
@@ -51,6 +68,14 @@ error() {
   printf "${RED}Error: %s${RESET}\n" "$1" >&2
 }
 
+as_root() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+
 install_k3s() {
   section "Installing K3s"
 
@@ -80,6 +105,55 @@ wait_for_k3s() {
   done
 }
 
+wait_for_k3s_containerd() {
+  section "Waiting for K3s containerd config"
+
+  if [ "$(id -u)" -ne 0 ]; then
+    sudo -v
+  fi
+
+  for ((i = 1; i <= K3S_CONTAINERD_READY_MAX_ATTEMPTS; i++)); do
+    if as_root test -f "$K3S_CONTAINERD_CONFIG" && as_root test -S "$K3S_CONTAINERD_SOCKET"; then
+      success "K3s containerd config is ready."
+      return
+    fi
+
+    if [ "$i" -eq "$K3S_CONTAINERD_READY_MAX_ATTEMPTS" ]; then
+      error "K3s containerd config or socket was not found in time."
+      error "Expected config: $K3S_CONTAINERD_CONFIG"
+      error "Expected socket: $K3S_CONTAINERD_SOCKET"
+      exit 1
+    fi
+
+    sleep "$K3S_CONTAINERD_READY_SLEEP_SECONDS"
+  done
+}
+
+ensure_k3s_containerd_template() {
+  wait_for_k3s_containerd
+
+  if as_root test -f "$K3S_CONTAINERD_CONFIG_TEMPLATE_V3"; then
+    K3S_CONTAINERD_TEMPLATE_PATH="$K3S_CONTAINERD_CONFIG_TEMPLATE_V3"
+  elif as_root test -f "$K3S_CONTAINERD_CONFIG_TEMPLATE_V2"; then
+    K3S_CONTAINERD_TEMPLATE_PATH="$K3S_CONTAINERD_CONFIG_TEMPLATE_V2"
+  else
+    if as_root grep -Eq '^[[:space:]]*version[[:space:]]*=[[:space:]]*3' "$K3S_CONTAINERD_CONFIG"; then
+      containerd_template_path="$K3S_CONTAINERD_CONFIG_TEMPLATE_V3"
+    else
+      containerd_template_path="$K3S_CONTAINERD_CONFIG_TEMPLATE_V2"
+    fi
+
+    if ! printf '%s\n' '{{ template "base" . }}' | as_root tee "$containerd_template_path" >/dev/null; then
+      error "Failed to create K3s containerd template at $containerd_template_path."
+      error "Re-run this script with permission to write under $K3S_CONTAINERD_CONFIG_DIR."
+      exit 1
+    fi
+
+    K3S_CONTAINERD_TEMPLATE_PATH="$containerd_template_path"
+    success "Created K3s containerd template: $K3S_CONTAINERD_TEMPLATE_PATH"
+  fi
+}
+
 check_helm() {
   section "Checking Helm"
 
@@ -92,19 +166,53 @@ check_helm() {
   success "Helm found: $(helm version --short)"
 }
 
-add_nvidia_helm_repo() {
-  section "Adding/updating NVIDIA device plugin Helm repo"
+install_kata_containers() {
+  section "Installing Kata Containers"
 
-  helm repo add "$NVDP_REPO_NAME" "$NVDP_REPO_URL" 2>/dev/null || true
-  helm repo update
+  helm_args=(
+    upgrade --install "$KATA_RELEASE_NAME" "$KATA_CHART_NAME"
+    --namespace "$KATA_NAMESPACE"
+    --set k8sDistribution=k3s
+    --wait
+  )
+
+  if [ -n "$KATA_CHART_VERSION" ]; then
+    helm_args+=(--version "$KATA_CHART_VERSION")
+  fi
+
+  helm "${helm_args[@]}"
 }
 
-install_nvidia_device_plugin() {
-  section "Installing NVIDIA device plugin"
+install_nvidia_gpu_operator() {
+  section "Installing NVIDIA GPU Operator"
 
-  helm install "$NVDP_RELEASE_NAME" "$NVDP_CHART_NAME" \
-    --namespace "$NVDP_NAMESPACE" \
+  helm repo add "$NVIDIA_GPU_OPERATOR_REPO_NAME" "$NVIDIA_GPU_OPERATOR_REPO_URL" 2>/dev/null || true
+  helm repo update
+
+  helm_args=(
+    upgrade --install "$NVIDIA_GPU_OPERATOR_RELEASE_NAME" "$NVIDIA_GPU_OPERATOR_CHART_NAME"
+    --namespace "$NVIDIA_GPU_OPERATOR_NAMESPACE"
     --create-namespace
+    --set "toolkit.env[0].name=CONTAINERD_CONFIG"
+    --set "toolkit.env[0].value=$K3S_CONTAINERD_TEMPLATE_PATH"
+    --set "toolkit.env[1].name=CONTAINERD_SOCKET"
+    --set "toolkit.env[1].value=$K3S_CONTAINERD_SOCKET"
+    --set "toolkit.env[2].name=CONTAINERD_RUNTIME_CLASS"
+    --set "toolkit.env[2].value=nvidia"
+    --wait
+  )
+
+  if [ -n "$NVIDIA_GPU_OPERATOR_CHART_VERSION" ]; then
+    helm_args+=(--version "$NVIDIA_GPU_OPERATOR_CHART_VERSION")
+  fi
+
+  helm "${helm_args[@]}"
+}
+
+apply_nginx_clusterip_example() {
+  section "Applying NGINX ClusterIP example"
+
+  kubectl apply -f "$NGINX_CLUSTERIP_EXAMPLE_MANIFEST_URL"
 }
 
 print_next_steps() {
@@ -114,17 +222,28 @@ print_next_steps() {
   echo "Check K3s nodes:"
   echo "  kubectl get nodes"
   echo
-  echo "Check NVIDIA device plugin pods:"
-  echo "  kubectl get pods -n $NVDP_NAMESPACE"
+  echo "Check RuntimeClasses:"
+  echo "  kubectl get runtimeclass"
+  echo
+  echo "Check Kata Containers pods:"
+  echo "  kubectl get pods -n $KATA_NAMESPACE"
+  echo
+  echo "Check NVIDIA GPU Operator pods:"
+  echo "  kubectl get pods -n $NVIDIA_GPU_OPERATOR_NAMESPACE"
+  echo
+  echo "Check NGINX ClusterIP example:"
+  echo "  kubectl get deployment,svc"
   echo
 }
 
 main() {
   install_k3s
   wait_for_k3s
+  ensure_k3s_containerd_template
   check_helm
-  add_nvidia_helm_repo
-  install_nvidia_device_plugin
+  install_kata_containers
+  install_nvidia_gpu_operator
+  apply_nginx_clusterip_example
   print_next_steps
 }
 
