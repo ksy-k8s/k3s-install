@@ -33,6 +33,11 @@ NVIDIA_GPU_OPERATOR_REPO_NAME="nvidia"
 NVIDIA_GPU_OPERATOR_REPO_URL="https://helm.ngc.nvidia.com/nvidia"
 NVIDIA_GPU_OPERATOR_CHART_NAME="nvidia/gpu-operator"
 NVIDIA_GPU_OPERATOR_CHART_VERSION="${NVIDIA_GPU_OPERATOR_CHART_VERSION:-}"
+NVIDIA_DRIVER_PREINSTALLED="false"
+NVIDIA_CONTAINER_TOOLKIT_PREINSTALLED="false"
+NVIDIA_K3S_RUNTIME_PRECONFIGURED="false"
+NVIDIA_CONTAINER_RUNTIME_DRIVER_ROOT_CONFIGURED="false"
+NVIDIA_CUDA_TOOLKIT_PREINSTALLED="false"
 
 NGINX_CLUSTERIP_EXAMPLE_MANIFEST_URL="https://gist.githubusercontent.com/ehsqjfwk99999/b94c0a2578594fe1ad75d17c1458cff9/raw/1fc7c012f99be40c781ea25eb1b7a0352ea433b1/nginx-deployment-clusterip-example.yaml"
 
@@ -74,6 +79,18 @@ as_root() {
   else
     sudo "$@"
   fi
+}
+
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+debian_package_installed() {
+  command_exists dpkg-query && dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed"
+}
+
+rpm_package_installed() {
+  command_exists rpm && rpm -q "$1" >/dev/null 2>&1
 }
 
 install_k3s() {
@@ -166,6 +183,52 @@ check_helm() {
   success "Helm found: $(helm version --short)"
 }
 
+detect_nvidia_host_state() {
+  section "Checking NVIDIA host state"
+
+  NVIDIA_DRIVER_PREINSTALLED="false"
+  NVIDIA_CONTAINER_TOOLKIT_PREINSTALLED="false"
+  NVIDIA_K3S_RUNTIME_PRECONFIGURED="false"
+  NVIDIA_CONTAINER_RUNTIME_DRIVER_ROOT_CONFIGURED="false"
+  NVIDIA_CUDA_TOOLKIT_PREINSTALLED="false"
+
+  if command_exists nvidia-smi && nvidia-smi -L >/dev/null 2>&1; then
+    NVIDIA_DRIVER_PREINSTALLED="true"
+    success "Working NVIDIA driver detected with nvidia-smi."
+  elif [ -r /proc/driver/nvidia/version ]; then
+    NVIDIA_DRIVER_PREINSTALLED="true"
+    success "Loaded NVIDIA driver detected."
+  else
+    warn "No working host NVIDIA driver detected; GPU Operator will manage the driver."
+  fi
+
+  if command_exists nvidia-ctk || command_exists nvidia-container-runtime || command_exists nvidia-container-cli || \
+    debian_package_installed nvidia-container-toolkit || rpm_package_installed nvidia-container-toolkit; then
+    NVIDIA_CONTAINER_TOOLKIT_PREINSTALLED="true"
+    success "NVIDIA Container Toolkit/runtime detected on the host."
+  else
+    warn "No host NVIDIA Container Toolkit/runtime detected; GPU Operator will manage the toolkit."
+  fi
+
+  if as_root grep -Eq 'runtimes[.]nvidia|nvidia-container-runtime|BinaryName[[:space:]]*=[[:space:]]*".*nvidia' "$K3S_CONTAINERD_CONFIG" "$K3S_CONTAINERD_TEMPLATE_PATH" 2>/dev/null; then
+    NVIDIA_K3S_RUNTIME_PRECONFIGURED="true"
+    success "K3s containerd already appears to have an NVIDIA runtime configured."
+  else
+    warn "K3s containerd does not appear preconfigured for NVIDIA; GPU Operator toolkit will configure it."
+  fi
+
+  if as_root test -f /etc/nvidia-container-runtime/config.toml && \
+    as_root grep -Eq '^[[:space:]]*root[[:space:]]*=[[:space:]]*"/run/nvidia/driver"' /etc/nvidia-container-runtime/config.toml; then
+    NVIDIA_CONTAINER_RUNTIME_DRIVER_ROOT_CONFIGURED="true"
+    success "NVIDIA Container Runtime is configured for GPU Operator driver containers."
+  fi
+
+  if command_exists nvcc || debian_package_installed nvidia-cuda-toolkit || rpm_package_installed nvidia-cuda-toolkit; then
+    NVIDIA_CUDA_TOOLKIT_PREINSTALLED="true"
+    warn "CUDA toolkit detected, but CUDA alone does not change GPU Operator Helm settings."
+  fi
+}
+
 install_kata_containers() {
   section "Installing Kata Containers"
 
@@ -201,6 +264,19 @@ install_nvidia_gpu_operator() {
     --set "toolkit.env[2].value=nvidia"
     --wait
   )
+
+  if [ "$NVIDIA_DRIVER_PREINSTALLED" = "true" ]; then
+    helm_args+=(--set driver.enabled=false)
+    success "Using pre-installed NVIDIA driver: driver.enabled=false"
+  fi
+
+  if [ "$NVIDIA_CONTAINER_TOOLKIT_PREINSTALLED" = "true" ] && [ "$NVIDIA_K3S_RUNTIME_PRECONFIGURED" = "true" ] && \
+    { [ "$NVIDIA_DRIVER_PREINSTALLED" = "true" ] || [ "$NVIDIA_CONTAINER_RUNTIME_DRIVER_ROOT_CONFIGURED" = "true" ]; }; then
+    helm_args+=(--set toolkit.enabled=false)
+    success "Using pre-installed NVIDIA Container Toolkit/runtime: toolkit.enabled=false"
+  else
+    success "GPU Operator will manage NVIDIA Container Toolkit for K3s containerd."
+  fi
 
   if [ -n "$NVIDIA_GPU_OPERATOR_CHART_VERSION" ]; then
     helm_args+=(--version "$NVIDIA_GPU_OPERATOR_CHART_VERSION")
@@ -242,6 +318,7 @@ main() {
   ensure_k3s_containerd_template
   check_helm
   install_kata_containers
+  detect_nvidia_host_state
   install_nvidia_gpu_operator
   apply_nginx_clusterip_example
   print_next_steps
