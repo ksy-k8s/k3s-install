@@ -27,6 +27,11 @@ KATA_NAMESPACE="kube-system"
 KATA_CHART_NAME="oci://ghcr.io/kata-containers/kata-deploy-charts/kata-deploy"
 KATA_CHART_VERSION="${KATA_CHART_VERSION:-}"
 
+CERT_MANAGER_RELEASE_NAME="cert-manager"
+CERT_MANAGER_NAMESPACE="cert-manager"
+CERT_MANAGER_CHART_NAME="oci://quay.io/jetstack/charts/cert-manager"
+CERT_MANAGER_CHART_VERSION="${CERT_MANAGER_CHART_VERSION:-}"
+
 NVIDIA_GPU_OPERATOR_RELEASE_NAME="gpu-operator"
 NVIDIA_GPU_OPERATOR_NAMESPACE="gpu-operator"
 NVIDIA_GPU_OPERATOR_REPO_NAME="nvidia"
@@ -183,6 +188,41 @@ check_helm() {
   success "Helm found: $(helm version --short)"
 }
 
+install_cert_manager() {
+  section "Installing cert-manager"
+
+  helm_args=(
+    upgrade --install "$CERT_MANAGER_RELEASE_NAME" "$CERT_MANAGER_CHART_NAME"
+    --namespace "$CERT_MANAGER_NAMESPACE"
+    --create-namespace
+    --set crds.enabled=true
+    --wait
+  )
+
+  if [ -n "$CERT_MANAGER_CHART_VERSION" ]; then
+    helm_args+=(--version "$CERT_MANAGER_CHART_VERSION")
+  fi
+
+  helm "${helm_args[@]}"
+}
+
+install_kata_containers() {
+  section "Installing Kata Containers"
+
+  helm_args=(
+    upgrade --install "$KATA_RELEASE_NAME" "$KATA_CHART_NAME"
+    --namespace "$KATA_NAMESPACE"
+    --set k8sDistribution=k3s
+    --wait
+  )
+
+  if [ -n "$KATA_CHART_VERSION" ]; then
+    helm_args+=(--version "$KATA_CHART_VERSION")
+  fi
+
+  helm "${helm_args[@]}"
+}
+
 detect_nvidia_host_state() {
   section "Checking NVIDIA host state"
 
@@ -227,23 +267,6 @@ detect_nvidia_host_state() {
     NVIDIA_CUDA_TOOLKIT_PREINSTALLED="true"
     warn "CUDA toolkit detected, but CUDA alone does not change GPU Operator Helm settings."
   fi
-}
-
-install_kata_containers() {
-  section "Installing Kata Containers"
-
-  helm_args=(
-    upgrade --install "$KATA_RELEASE_NAME" "$KATA_CHART_NAME"
-    --namespace "$KATA_NAMESPACE"
-    --set k8sDistribution=k3s
-    --wait
-  )
-
-  if [ -n "$KATA_CHART_VERSION" ]; then
-    helm_args+=(--version "$KATA_CHART_VERSION")
-  fi
-
-  helm "${helm_args[@]}"
 }
 
 install_nvidia_gpu_operator() {
@@ -304,6 +327,9 @@ print_next_steps() {
   echo "Check Kata Containers pods:"
   echo "  kubectl get pods -n $KATA_NAMESPACE"
   echo
+  echo "Check cert-manager pods:"
+  echo "  kubectl get pods -n $CERT_MANAGER_NAMESPACE"
+  echo
   echo "Check NVIDIA GPU Operator pods:"
   echo "  kubectl get pods -n $NVIDIA_GPU_OPERATOR_NAMESPACE"
   echo
@@ -317,6 +343,7 @@ main() {
   wait_for_k3s
   ensure_k3s_containerd_template
   check_helm
+  install_cert_manager
   install_kata_containers
   detect_nvidia_host_state
   install_nvidia_gpu_operator
