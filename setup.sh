@@ -98,6 +98,9 @@ rpm_package_installed() {
   command_exists rpm && rpm -q "$1" >/dev/null 2>&1
 }
 
+# Install docs:
+# https://docs.k3s.io/installation
+# https://docs.k3s.io/installation/configuration
 install_k3s() {
   section "Installing K3s"
 
@@ -188,6 +191,8 @@ check_helm() {
   success "Helm found: $(helm version --short)"
 }
 
+# Install docs:
+# https://cert-manager.io/docs/installation/helm/
 install_cert_manager() {
   section "Installing cert-manager"
 
@@ -206,6 +211,9 @@ install_cert_manager() {
   helm "${helm_args[@]}"
 }
 
+# Install docs:
+# https://github.com/kata-containers/kata-containers/tree/main/tools/packaging/kata-deploy/helm-chart/kata-deploy
+# https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/deploy-kata-containers.html
 install_kata_containers() {
   section "Installing Kata Containers"
 
@@ -269,6 +277,8 @@ detect_nvidia_host_state() {
   fi
 }
 
+# Install docs:
+# https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html
 install_nvidia_gpu_operator() {
   section "Installing NVIDIA GPU Operator"
 
@@ -308,6 +318,8 @@ install_nvidia_gpu_operator() {
   helm "${helm_args[@]}"
 }
 
+# Manifest source:
+# https://gist.github.com/ehsqjfwk99999/b94c0a2578594fe1ad75d17c1458cff9
 apply_nginx_clusterip_example() {
   section "Applying NGINX ClusterIP example"
 
@@ -318,22 +330,16 @@ print_next_steps() {
   section "Next steps"
   success "Done."
   echo
-  echo "Check K3s nodes:"
   echo "  kubectl get nodes"
   echo
-  echo "Check RuntimeClasses:"
-  echo "  kubectl get runtimeclass"
-  echo
-  echo "Check Kata Containers pods:"
-  echo "  kubectl get pods -n $KATA_NAMESPACE"
-  echo
-  echo "Check cert-manager pods:"
   echo "  kubectl get pods -n $CERT_MANAGER_NAMESPACE"
   echo
-  echo "Check NVIDIA GPU Operator pods:"
+  echo "  kubectl get pods -n $KATA_NAMESPACE"
+  echo
+  echo "  kubectl get runtimeclass"
+  echo
   echo "  kubectl get pods -n $NVIDIA_GPU_OPERATOR_NAMESPACE"
   echo
-  echo "Check NGINX ClusterIP example:"
   echo "  kubectl get deployment,svc"
   echo
 }
