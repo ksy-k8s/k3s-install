@@ -11,10 +11,7 @@ KUBECONFIG_PATH="$HOME/.kube/config"
 
 K3S_CONTAINERD_CONFIG_DIR="/var/lib/rancher/k3s/agent/etc/containerd"
 K3S_CONTAINERD_CONFIG="$K3S_CONTAINERD_CONFIG_DIR/config.toml"
-K3S_CONTAINERD_CONFIG_TEMPLATE_V3="$K3S_CONTAINERD_CONFIG_DIR/config-v3.toml.tmpl"
-K3S_CONTAINERD_CONFIG_TEMPLATE_V2="$K3S_CONTAINERD_CONFIG_DIR/config.toml.tmpl"
 K3S_CONTAINERD_SOCKET="/run/k3s/containerd/containerd.sock"
-K3S_CONTAINERD_TEMPLATE_PATH=""
 
 K3S_READY_MAX_ATTEMPTS=60
 K3S_READY_SLEEP_SECONDS=5
@@ -154,31 +151,6 @@ wait_for_k3s_containerd() {
   done
 }
 
-ensure_k3s_containerd_template() {
-  wait_for_k3s_containerd
-
-  if as_root test -f "$K3S_CONTAINERD_CONFIG_TEMPLATE_V3"; then
-    K3S_CONTAINERD_TEMPLATE_PATH="$K3S_CONTAINERD_CONFIG_TEMPLATE_V3"
-  elif as_root test -f "$K3S_CONTAINERD_CONFIG_TEMPLATE_V2"; then
-    K3S_CONTAINERD_TEMPLATE_PATH="$K3S_CONTAINERD_CONFIG_TEMPLATE_V2"
-  else
-    if as_root grep -Eq '^[[:space:]]*version[[:space:]]*=[[:space:]]*3' "$K3S_CONTAINERD_CONFIG"; then
-      containerd_template_path="$K3S_CONTAINERD_CONFIG_TEMPLATE_V3"
-    else
-      containerd_template_path="$K3S_CONTAINERD_CONFIG_TEMPLATE_V2"
-    fi
-
-    if ! printf '%s\n' '{{ template "base" . }}' | as_root tee "$containerd_template_path" >/dev/null; then
-      error "Failed to create K3s containerd template at $containerd_template_path."
-      error "Re-run this script with permission to write under $K3S_CONTAINERD_CONFIG_DIR."
-      exit 1
-    fi
-
-    K3S_CONTAINERD_TEMPLATE_PATH="$containerd_template_path"
-    success "Created K3s containerd template: $K3S_CONTAINERD_TEMPLATE_PATH"
-  fi
-}
-
 check_helm() {
   section "Checking Helm"
 
@@ -258,7 +230,7 @@ detect_nvidia_host_state() {
     warn "No host NVIDIA Container Toolkit/runtime detected; GPU Operator will manage the toolkit."
   fi
 
-  if as_root grep -Eq 'runtimes[.]nvidia|nvidia-container-runtime|BinaryName[[:space:]]*=[[:space:]]*".*nvidia' "$K3S_CONTAINERD_CONFIG" "$K3S_CONTAINERD_TEMPLATE_PATH" 2>/dev/null; then
+  if as_root grep -Eq 'runtimes[.]nvidia|nvidia-container-runtime|BinaryName[[:space:]]*=[[:space:]]*".*nvidia' "$K3S_CONTAINERD_CONFIG" 2>/dev/null; then
     NVIDIA_K3S_RUNTIME_PRECONFIGURED="true"
     success "K3s containerd already appears to have an NVIDIA runtime configured."
   else
@@ -290,11 +262,13 @@ install_nvidia_gpu_operator() {
     --namespace "$NVIDIA_GPU_OPERATOR_NAMESPACE"
     --create-namespace
     --set "toolkit.env[0].name=CONTAINERD_CONFIG"
-    --set "toolkit.env[0].value=$K3S_CONTAINERD_TEMPLATE_PATH"
+    --set "toolkit.env[0].value=$K3S_CONTAINERD_CONFIG"
     --set "toolkit.env[1].name=CONTAINERD_SOCKET"
     --set "toolkit.env[1].value=$K3S_CONTAINERD_SOCKET"
-    --set "toolkit.env[2].name=CONTAINERD_RUNTIME_CLASS"
-    --set "toolkit.env[2].value=nvidia"
+    --set "toolkit.env[2].name=RUNTIME_CONFIG_SOURCE"
+    --set-string "toolkit.env[2].value=file=$K3S_CONTAINERD_CONFIG"
+    --set "toolkit.env[3].name=CONTAINERD_RUNTIME_CLASS"
+    --set "toolkit.env[3].value=nvidia"
     --wait
   )
 
@@ -347,13 +321,13 @@ print_next_steps() {
 main() {
   install_k3s
   wait_for_k3s
-  ensure_k3s_containerd_template
+  wait_for_k3s_containerd
   check_helm
-  install_cert_manager
+  #install_cert_manager
   install_kata_containers
   detect_nvidia_host_state
   install_nvidia_gpu_operator
-  apply_nginx_clusterip_example
+  #apply_nginx_clusterip_example
   print_next_steps
 }
 
